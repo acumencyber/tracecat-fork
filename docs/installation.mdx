@@ -35,8 +35,8 @@ Tracecat can be deployed locally from our Github repository.
 Run these commands to clone the Tracecat repository:
 
 ```bash
-# Run these commands in your terminal
-git clone https://github.com/TracecatHQ/tracecat.git
+# Clone latest stable release
+git clone --branch 0.6.6 --single-branch https://github.com/TracecatHQ/tracecat.git
 cd tracecat
 ```
 
@@ -60,7 +60,6 @@ cp .env.example .env
 | -------------- | -------------------------------------------------------------------------------------------------------------- |
 | `TRACECAT__`   | Tracecat's internal environment variables                                                                      |
 | `TEMPORAL__`   | Tracecat's Temporal-specific environment variables. Tracecat uses these to connect to local Temporal services. |
-| `CLERK_`       | Clerk-specific environment variables                                                                           |
 | `NEXT_PUBLIC_` | NextJS-specific public environment variables                                                                   |
 | `NEXT_SERVER_` | NextJS-specific environment variables                                                                          |
 

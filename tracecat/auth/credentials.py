@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable
 from contextlib import contextmanager
 from functools import partial
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
-import httpx
-from fastapi import Depends, HTTPException, Request, Security, status
+from fastapi import Depends, HTTPException, Path, Query, Request, Security, status
 from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
-from jose import ExpiredSignatureError, JWTError, jwk, jwt
+from pydantic import UUID4
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from tracecat import config
+from tracecat.auth.schemas import UserRole
+from tracecat.auth.users import current_active_user, optional_current_active_user
+from tracecat.authz.service import AuthorizationService
 from tracecat.contexts import ctx_role
+from tracecat.db.engine import get_async_session
+from tracecat.db.schemas import User
 from tracecat.logging import logger
-from tracecat.types.auth import Role
+from tracecat.types.auth import AccessLevel, Role
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
 api_key_header_scheme = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -23,10 +29,16 @@ api_key_header_scheme = APIKeyHeader(name="X-API-Key", auto_error=False)
 CREDENTIALS_EXCEPTION = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED,
     detail="Could not validate credentials",
-    headers={"WWW-Authenticate": "Bearer"},
+    headers={"WWW-Authenticate": "Cookie"},
 )
 
-IS_AUTH_DISABLED = str(os.environ.get("TRACECAT__DISABLE_AUTH")) in ("true", "1")
+HTTP_EXC = partial(
+    lambda msg: HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=msg or "Could not validate credentials",
+        headers={"WWW-Authenticate": "Cookie"},
+    )
+)
 
 
 def _internal_get_role_from_service_key(
@@ -48,124 +60,143 @@ def _internal_get_role_from_service_key(
         raise CREDENTIALS_EXCEPTION
     return Role(
         type="service",
-        user_id=user_id,
+        workspace_id=user_id,
         service_id=service_role_name,
     )
 
 
-async def get_clerk_public_key(kid: str) -> dict[str, Any] | None:
-    """Get the public key from the JWKS endpoint using the JWT kid claim."""
-    async with httpx.AsyncClient() as client:
-        jwks_uri = os.environ["CLERK_FRONTEND_API_URL"] + "/.well-known/jwks.json"
-        response = await client.get(jwks_uri)
-        jwks = response.json()
-    public_keys = {
-        key["kid"]: jwk.construct(key) for key in jwks["keys"] if key["kid"] == kid
-    }
-    return public_keys.get(kid)
+USER_ROLE_TO_ACCESS_LEVEL = {
+    UserRole.ADMIN: AccessLevel.ADMIN,
+    UserRole.BASIC: AccessLevel.BASIC,
+}
 
 
-HTTP_EXC = partial(
-    lambda msg: HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail=msg or "Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
+def get_role_from_user(
+    user: User, workspace_id: UUID4 | None = None, service_id: str = "tracecat-api"
+) -> Role:
+    return Role(
+        type="user",
+        workspace_id=workspace_id,
+        user_id=user.id,
+        service_id=service_id,
+        access_level=USER_ROLE_TO_ACCESS_LEVEL[user.role],
     )
-)
-
-if IS_AUTH_DISABLED:
-    # Override the authentication functions with a dummy function
-    _DEFAULT_TRACECAT_USER_ID = "default-tracecat-user"
-    _DEFAULT_TRACECAT_JWT = "super-secret-jwt-token"
-
-    async def _get_role_from_jwt(token: str | bytes) -> Role:
-        if token != _DEFAULT_TRACECAT_JWT:
-            logger.error("Auth disabled, please use the default JWT")
-            raise HTTP_EXC(f"Auth disabled, please use {_DEFAULT_TRACECAT_JWT!r}.")
-        role = Role(
-            type="user", user_id=_DEFAULT_TRACECAT_USER_ID, service_id="tracecat-api"
-        )
-        return role
-
-    async def _get_role_from_service_key(request: Request, api_key: str) -> Role:
-        user_id = _DEFAULT_TRACECAT_USER_ID
-        service_role_name = request.headers.get("Service-Role")
-        role = _internal_get_role_from_service_key(
-            user_id=user_id, service_role_name=service_role_name, api_key=api_key
-        )
-        return role
-else:
-
-    async def _get_role_from_jwt(token: str | bytes) -> Role:
-        try:
-            match jwt.get_unverified_headers(token):
-                case {
-                    "alg": alg,
-                    "kid": kid,
-                    "typ": "JWT",
-                }:
-                    clerk_public_key = await get_clerk_public_key(kid=kid)
-                case _:
-                    msg = "Invalid JWT headers"
-                    logger.error(msg)
-                    raise HTTP_EXC(msg)
-            if clerk_public_key is None:
-                msg = "Could not get public key"
-                logger.error(msg)
-                raise HTTP_EXC(msg)
-            payload = jwt.decode(
-                token,
-                key=clerk_public_key,
-                algorithms=alg,
-                issuer=os.environ["CLERK_FRONTEND_API_URL"],
-                # NOTE: Workaround, not sure if there are alternatives
-                options={"verify_aud": False},
-            )
-            user_id: str = payload.get("sub")
-            if user_id is None:
-                raise HTTP_EXC("No sub claim in JWT")
-        except ExpiredSignatureError as e:
-            logger.error("Signature expired", error=e)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Session expired",
-                headers={
-                    "WWW-Authenticate": "Bearer",
-                    "Access-Control-Expose-Headers": "X-Expired-Token",
-                    "X-Expired-Token": "true",
-                },
-            ) from e
-        except JWTError as e:
-            msg = f"JWT Error {e}"
-            logger.error(msg)
-            raise HTTP_EXC(msg) from e
-        except Exception as e:
-            msg = f"Error {e}"
-            logger.error(msg)
-            raise HTTP_EXC(msg) from e
-
-        role = Role(type="user", user_id=user_id, service_id="tracecat-api")
-        return role
-
-    async def _get_role_from_service_key(request: Request, api_key: str) -> Role:
-        user_id = request.headers.get("Service-User-ID")
-        service_role_name = request.headers.get("Service-Role")
-        role = _internal_get_role_from_service_key(
-            user_id=user_id, service_role_name=service_role_name, api_key=api_key
-        )
-        return role
 
 
 async def authenticate_user(
-    token: Annotated[str, Depends(oauth2_scheme)],
+    user: Annotated[User, Depends(current_active_user)],
 ) -> Role:
-    """Authenticate a user JWT and return the 'sub' claim as the user_id.
+    """Return a Role object for the user."""
+    role = get_role_from_user(user)
+    ctx_role.set(role)
+    return role
+
+
+def authenticate_user_access_level(access_level: AccessLevel) -> Awaitable[Role]:
+    """Returns a FastAPI dependency that asserts that the user has at least
+    the provided access level."""
+
+    # XXX: There may be a use case to use `current_admin_user` here.
+    async def dependency(
+        user: Annotated[User, Depends(current_active_user)],
+    ) -> User:
+        """Authenticate a user with access levels and return a `User` object."""
+        user_access_level = USER_ROLE_TO_ACCESS_LEVEL[user.role]
+        if user_access_level < access_level:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. User does not have the appropriate access level",
+            )
+        role = get_role_from_user(user)
+        ctx_role.set(role)
+        return role
+
+    return dependency
+
+
+async def get_workspace_id(request: Request) -> UUID4:
+    """Get the workspace ID from the path or query parameters."""
+    # Check for the workspace ID in the path
+    if workspace_id_path := request.path_params.get("workspace_id"):
+        return workspace_id_path
+    # Check for the workspace ID in the query
+    if workspace_id_query := request.query_params.get("workspace_id"):
+        return workspace_id_query
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Workspace ID must be provided either as a path or query parameter.",
+    )
+
+
+async def authenticate_user_for_workspace_by_path(
+    user: Annotated[User, Depends(current_active_user)],
+    session: Annotated[AsyncSession, Depends(get_async_session)],
+    workspace_id: UUID4 = Path(...),
+) -> Role:
+    """Authenticate a user for a workspace passed in as a path parameter.
 
     `ctx_role` ContextVar is set here.
     """
-    if not token:
-        raise CREDENTIALS_EXCEPTION
-    role = await _get_role_from_jwt(token)
+    return await _authenticate_user_for_workspace(user, session, workspace_id)
+
+
+async def authenticate_user_for_workspace(
+    user: Annotated[User, Depends(current_active_user)],
+    session: Annotated[AsyncSession, Depends(get_async_session)],
+    workspace_id: UUID4 = Query(...),
+) -> Role:
+    """Authenticate a user for a workspace passed in as a query parameter.
+
+    `ctx_role` ContextVar is set here.
+    """
+    return await _authenticate_user_for_workspace(user, session, workspace_id)
+
+
+async def _authenticate_user_for_workspace(
+    user: User, session: AsyncSession, workspace_id: UUID4
+) -> Role:
+    """Authenticate a user for a workspace.
+
+    `ctx_role` ContextVar is set here.
+    """
+    if not user.is_superuser or not user.role == UserRole.ADMIN:
+        # Check if non-admin user is a member of the workspace
+        authz_service = AuthorizationService(session)
+        if not await authz_service.user_is_workspace_member(
+            user_id=user.id, workspace_id=workspace_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. User not a member of this workspace",
+            )
+    role = get_role_from_user(user, workspace_id=workspace_id)
+    ctx_role.set(role)
+    return role
+
+
+async def authenticate_optional_user_for_workspace(
+    user: Annotated[User | None, Depends(optional_current_active_user)],
+    session: Annotated[AsyncSession, Depends(get_async_session)],
+    workspace_id: UUID4 = Query(...),
+) -> Role | None:
+    """Authenticate a user for a workspace.
+
+    If no user available, return None.
+    If a user is available, `ctx_role` ContextVar is set here.
+    """
+    if not user:
+        return None
+    if not user.is_superuser or not user.role == UserRole.ADMIN:
+        # Check if non-admin user is a member of the workspace
+        authz_service = AuthorizationService(session)
+        if not await authz_service.user_is_workspace_member(
+            user_id=user.id, workspace_id=workspace_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. User not a member of this workspace",
+            )
+    role = get_role_from_user(user, workspace_id=workspace_id)
     ctx_role.set(role)
     return role
 
@@ -178,13 +209,19 @@ async def authenticate_service(
 
     `ctx_role` ContextVar is set here.
     """
-    role = await _get_role_from_service_key(request, api_key)
+    user_id = request.headers.get("Service-User-ID")
+    service_role_name = request.headers.get("Service-Role")
+    role = _internal_get_role_from_service_key(
+        user_id=user_id, service_role_name=service_role_name, api_key=api_key
+    )
     ctx_role.set(role)
     return role
 
 
-async def authenticate_user_or_service(
-    token: Annotated[str | None, Depends(oauth2_scheme)] = None,
+async def authenticate_user_or_service_for_workspace(
+    role_from_user: Annotated[
+        Role | None, Depends(authenticate_optional_user_for_workspace)
+    ] = None,
     api_key: Annotated[str | None, Security(api_key_header_scheme)] = None,
     request: Request = None,
 ) -> Role:
@@ -192,10 +229,13 @@ async def authenticate_user_or_service(
 
     Note: Don't have to set the session context here,
     we've already done that in the user/service checks."""
-    if token:
-        return await authenticate_user(token)
+    if role_from_user:
+        logger.trace("User authentication")
+        return role_from_user
     if api_key:
+        logger.trace("Service authentication")
         return await authenticate_service(request, api_key)
+    logger.error("Could not validate credentials")
     raise HTTP_EXC("Could not validate credentials")
 
 
@@ -207,7 +247,7 @@ def TemporaryRole(
 ):
     """An async context manager to authenticate a user or service."""
     prev_role = ctx_role.get()
-    temp_role = Role(type=type, user_id=user_id, service_id=service_id)
+    temp_role = Role(type=type, workspace_id=user_id, service_id=service_id)
     ctx_role.set(temp_role)
     try:
         yield temp_role

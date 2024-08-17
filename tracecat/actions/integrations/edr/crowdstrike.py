@@ -70,9 +70,9 @@ def get_crowdstrike_credentials():
 
 
 @registry.register(
-    default_title="List Crowdstrike alerts",
-    description="Fetch all Crowdstrike alerts from Falcon SIEM.",
-    display_group="Crowdstrike",
+    default_title="List CrowdStrike alerts",
+    description="Fetch all CrowdStrike alerts from CrowdStrike.",
+    display_group="CrowdStrike",
     namespace="integrations.crowdstrike",
     secrets=[crowdstrike_secret],
 )
@@ -97,15 +97,19 @@ async def list_crowdstrike_alerts(
     filter = filter or f"created_timestamp:>='{start_time.isoformat()}' + created_timestamp:<='{end_time.isoformat()}'"
     response = falcon.query_alerts_v2(
         limit=limit,
+<<<<<<< HEAD
         filter=filter,
+=======
+        filter=f"created_timestamp:>='{start_time.isoformat()}' created_timestamp:<='{end_time.isoformat()}'",
+>>>>>>> e070b8e344784fe75c35f5883a9ece347da8349a
     )
     return response
 
 
 @registry.register(
-    default_title="List Crowdstrike detects",
-    description="Fetch all Crowdstrike detections from Falcon SIEM.",
-    display_group="Crowdstrike",
+    default_title="List CrowdStrike detects",
+    description="Fetch all CrowdStrike detections from Falcon SIEM.",
+    display_group="CrowdStrike",
     namespace="integrations.crowdstrike",
     secrets=[crowdstrike_secret],
 )
@@ -130,15 +134,19 @@ async def list_crowdstrike_detects(
     filter = filter or f"created_timestamp:>='{start_time.isoformat()}' + created_timestamp:<='{end_time.isoformat()}'"
     response = falcon.query_detects(
         limit=limit,
+<<<<<<< HEAD
         filter=filter,
+=======
+        filter=f"updated_timestamp:>='{start_time.isoformat()}' updated_timestamp:<='{end_time.isoformat()}'",
+>>>>>>> e070b8e344784fe75c35f5883a9ece347da8349a
     )
     return response
 
 
 @registry.register(
-    default_title="Update Crowdstrike alert status",
-    description="Update the status of Crowdstrike alerts.",
-    display_group="Crowdstrike",
+    default_title="Update CrowdStrike alert status",
+    description="Update the status of CrowdStrike alerts.",
+    display_group="CrowdStrike",
     namespace="integrations.crowdstrike",
     secrets=[crowdstrike_secret],
 )
@@ -160,9 +168,9 @@ async def update_crowdstrike_alert_status(
 
 
 @registry.register(
-    default_title="Update Crowdstrike detect status",
-    description="Update the status of Crowdstrike detects.",
-    display_group="Crowdstrike",
+    default_title="Update CrowdStrike detect status",
+    description="Update the status of CrowdStrike detects.",
+    display_group="CrowdStrike",
     namespace="integrations.crowdstrike",
     secrets=[crowdstrike_secret],
 )

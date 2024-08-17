@@ -37,7 +37,7 @@ class WorkflowDefinitionsService:
         self, workflow_id: identifiers.WorkflowID, *, version: int | None = None
     ) -> WorkflowDefinition | None:
         statement = select(WorkflowDefinition).where(
-            WorkflowDefinition.owner_id == self.role.user_id,
+            WorkflowDefinition.owner_id == self.role.workspace_id,
             WorkflowDefinition.workflow_id == workflow_id,
         )
         if version:
@@ -58,7 +58,7 @@ class WorkflowDefinitionsService:
             role=self.role,
         )
         wf_statement = select(Workflow.id).where(
-            Workflow.owner_id == self.role.user_id,
+            Workflow.owner_id == self.role.workspace_id,
             Workflow.title == workflow_title,
         )
 
@@ -77,7 +77,7 @@ class WorkflowDefinitionsService:
             return None
 
         wf_defn_statement = select(WorkflowDefinition).where(
-            WorkflowDefinition.owner_id == self.role.user_id,
+            WorkflowDefinition.owner_id == self.role.workspace_id,
             WorkflowDefinition.workflow_id == wf_id,
         )
 
@@ -98,7 +98,7 @@ class WorkflowDefinitionsService:
         self, workflow_id: identifiers.WorkflowID | None = None
     ) -> list[WorkflowDefinition]:
         statement = select(WorkflowDefinition).where(
-            WorkflowDefinition.owner_id == self.role.user_id,
+            WorkflowDefinition.owner_id == self.role.workspace_id,
         )
         if workflow_id:
             statement = statement.where(WorkflowDefinition.workflow_id == workflow_id)
@@ -106,12 +106,16 @@ class WorkflowDefinitionsService:
         return list(result.all())
 
     async def create_workflow_definition(
-        self, workflow_id: identifiers.WorkflowID, dsl: DSLInput
+        self,
+        workflow_id: identifiers.WorkflowID,
+        dsl: DSLInput,
+        *,
+        commit: bool = True,
     ) -> WorkflowDefinition:
         statement = (
             select(WorkflowDefinition)
             .where(
-                WorkflowDefinition.owner_id == self.role.user_id,
+                WorkflowDefinition.owner_id == self.role.workspace_id,
                 WorkflowDefinition.workflow_id == workflow_id,
             )
             .order_by(WorkflowDefinition.version.desc())  # type: ignore
@@ -121,11 +125,15 @@ class WorkflowDefinitionsService:
 
         version = latest_defn.version + 1 if latest_defn else 1
         defn = WorkflowDefinition(
-            owner_id=self.role.user_id,
+            owner_id=self.role.workspace_id,
             workflow_id=workflow_id,
             content=dsl.model_dump(),
             version=version,
         )
+        if commit:
+            self._session.add(defn)
+            await self._session.commit()
+            await self._session.refresh(defn)
         return defn
 
 

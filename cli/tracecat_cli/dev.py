@@ -16,9 +16,9 @@ import typer
 import yaml
 from pydantic import BaseModel
 
-from ._client import Client
-from ._config import config
-from ._utils import read_input
+from .client import Client
+from .config import config
+from .utils import read_input
 
 app = typer.Typer(no_args_is_help=True, help="Dev tools.")
 
@@ -100,11 +100,6 @@ def api(
     result = hit_api_endpoint(method, endpoint, payload)
     rich.print("Hit the endpoint successfully!")
     rich.print(result, len(result))
-
-
-@app.command(help="Print the current role")
-def whoami():
-    rich.print(config.role)
 
 
 @app.command(name="generate-spec", help="Generate OpenAPI specification. Requires npx.")
